@@ -537,207 +537,170 @@ class advi {
   }
 
   /**
-   * Run Robust Variational Inference.
-   * A. Dhaka et al., 2020
+   * Run Fixed-learning-rate Robust Variational Inference.
+   * J. Huggins et al., 2021
    * 
    * @param[in] variational The variational class
-   * @param[in] eta Stepsize constant
+   * @param[in] eta Learning rate(stepsize, constant)
    * @param[in] max_runs Max number of VI iterations
-   * @param[in] eval_window Interval to calculate termination conditions
-   * @param[in] window_size Proportion of eval_window samples to calculate
-   * Rhat for termination condition
-   * @param[in] rhat_cut Rhat termination criteria
-   * @param[in] mcse_cut MCSE termination criteria
-   * @param[in] ess_cut effective sample size termination criteria
+   * @param[in] min_window_size Minimum window size to calculate Rhat
+   * @param[in] ess_cut Maximum sample size threshold
+   * @param[in] mcse_cut Minimum MCSE threshold
+   * @param[in] check_frequency Frequency to check for convergence 
+   * @param[in] num_grid_points Number of iterate values to calculate min(Rhat)
+   * in grid search
    * @param[in] num_chains Number of VI chains to run
    * @param[in] logger logger
    */
   void run_rvi(Q& variational, const double eta,
-	        const int max_runs, const int eval_window, const double window_size,
-          const double rhat_cut, const double mcse_cut, const double ess_cut, 
+	        const int max_runs, const int min_window_size, int ess_cut,
+          const double mcse_cut, int check_frequency, const int num_grid_points,
           const int num_chains, callbacks::logger& logger) const {
 
     std::stringstream ss;
 
-    double khat, ess, mcse, max_rhat, rhat, eta_scaled;
-    int T0 = max_runs - 1;
+    if (min_sample_size <= 0){
+      min_sample_size = min_window_size / 8;
+    }
+    if (check_frequency <= 0){
+      check_frequency = min_window_size;
+    }
 
-    const int dim = variational.dimension();
-    const int n_approx_params = variational.num_approx_params();
+    const int model_dim = variational.dimension();
+    const int num_approx_params = variational.num_approx_params();
 
-    std::vector<Q> variational_obj_vec;
-    std::vector<Q> elbo_grad_vec;
-    std::vector<Q> elbo_grad_square_vec;
+    std::vector<Q> variational_obj_vec; // vector of variational objs per chain
+    std::vector<Q> elbo_grad_vec; // variational to store elbo grads per chain
 
-    // for each chain, save variational parameter values on matrix
-    // of dim (n_params, n_iters)
+    // For each chain, save variational parameter values on matrix
+    // of dim (n_params, n_iters).
+    // tbh, RowMajor isn't necessary, but it made me easier to keep track of
+    // indexes and not screw them up
     typedef Eigen::Matrix<double, Eigen::Dynamic, 
                           Eigen::Dynamic, Eigen::RowMajor> histMat;
-    std::vector<histMat> hist_vector;
+
+    std::vector<histMat> hist_vector; // save values per iter per chain
+
     hist_vector.reserve(num_chains);
     variational_obj_vec.reserve(num_chains);
     elbo_grad_vec.reserve(num_chains);
-    elbo_grad_square_vec.reserve(num_chains);
 
     for(int i = 0; i < num_chains; i++){
       hist_vector.push_back(histMat(n_approx_params, max_runs));
       variational_obj_vec.push_back(Q(cont_params_));
       elbo_grad_vec.push_back(Q(dim));
-      elbo_grad_square_vec.push_back(Q(dim));
     }
 
+    // FASO specific variables
+    int k_conv = std::numeric_limits<int>::quiet_NaN();
+    int w_check = std::numeric_limits<int>::quiet_NaN();
+    double mcse_estimate = std::numeric_limits<double>::quiet_NaN();
+    bool success = false;
+    //
+
+    std::chrono::duration<double> optimize_duration(0);
+    std::chrono::duration<double> mcse_duration(0);
     for (int n_iter = 0; n_iter < max_runs; n_iter++){
-      eta_scaled = eta / sqrt(static_cast<double>(n_iter + 1));
+      auto start = std::chrono::steady_clock::now();
       for (int n_chain = 0; n_chain < num_chains; n_chain++){
         calc_ELBO_grad(variational_obj_vec[n_chain], elbo_grad_vec[n_chain], logger);
-        if (n_iter == 0) {
-          elbo_grad_square_vec[n_chain] += elbo_grad_vec[n_chain].square();
-        }
-        else {
-          elbo_grad_square_vec[n_chain] = 0.9 * elbo_grad_square_vec[n_chain]
-                                          + 0.1 * elbo_grad_vec[n_chain].square();
-        }
-        variational_obj_vec[n_chain] += eta_scaled * elbo_grad_vec[n_chain] / (1.0 + elbo_grad_square_vec[n_chain].sqrt());
+        variational_obj_vec[n_chain] -= eta * elbo_grad_vec[n_chain];
+        // stochastic update
 
         hist_vector[n_chain].col(n_iter) = variational_obj_vec[n_chain].return_approx_params();
       }
+      optimize_duration += std::chrono::steady_clock::now() - start;
+      optimize_duration /= num_chains;
 
-      if ((n_iter % eval_window == 0 && n_iter > 0) || n_iter == max_runs - 1){
-        max_rhat = std::numeric_limits<double>::lowest();
-        for(int k = 0; k < n_approx_params; k++) {
-          std::vector<const double*> hist_ptrs;
-          std::vector<size_t> chain_length;
-          const int split_point = n_iter/2;
-          if(num_chains == 1){
-            // use split rhat
-            chain_length.assign(2, static_cast<size_t>(n_iter/2 * window_size));
-            hist_ptrs.push_back(hist_vector[0].row(k).data() + split_point - chain_length[0]);
-            hist_ptrs.push_back(hist_ptrs[0] + n_iter - chain_length[0]);
-          }
-          else{
-            for(int i = 0; i < num_chains; i++){
-              //chain_length.push_back(static_cast<size_t>(n_iter * window_size));
-              //hist_ptrs.push_back(hist_vector[i].row(k).data());
-
-              // multi-chain split rhat (split each chain into 2)
-              chain_length.insert(chain_length.end(), 2, static_cast<size_t>(n_iter/2 * window_size));
-              hist_ptrs.push_back(hist_vector[i].row(k).data() + split_point - chain_length[0]);
-              hist_ptrs.push_back(hist_vector[i].row(k).data() +  n_iter - chain_length[0]);
-            }
-          }
-          rhat = stan::analyze::compute_potential_scale_reduction(hist_ptrs, chain_length);
-          max_rhat = std::max<double>(max_rhat, rhat);
-        }
-
-        if (max_rhat < rhat_cut) {
-          T0 = n_iter;
-          ss << "Preliminary iterations terminated by rhat condition at iteration # " << T0 <<
-                " with max reported Rhat value of " << max_rhat << "\n";
-          break;
-        }
-      }
-    }
-
-    ss << "Pre-iteration done. T0: " << T0 << "\n";
-
-    bool khat_failed = false;
-    for(int k = 0; k < num_chains; k++){
-      Eigen::VectorXd lw_vec(n_posterior_samples_);
-      lr(variational_obj_vec[k], lw_vec);
-      double sigma, max_lw;
-      int n_tail;
-      if(n_posterior_samples_ < 225) {
-        n_tail = int(lw_vec.size() * 0.2);
-      }
-      else{
-        n_tail = 3 * sqrt(lw_vec.size()); // if more than 225 samples 3 * sqrt(lw_vec.size())
-      }
-      max_lw = lw_vec.maxCoeff();
-      lw_vec = lw_vec.array() - max_lw;
-      lw_vec = lw_vec.array().exp() - std::exp(lw_vec(n_tail));
-      lw_vec = lw_vec.head(n_tail);
-      stan::analyze::gpdfit(lw_vec, khat, sigma);
-
-      ss << "Chain " << k << " khat: " << khat << "\n";
-      if(khat > 1.0) { 
-        khat_failed = true;
-        break;
-      }
-    }
-    if (khat_failed || max_rhat > rhat_cut) {
-      logger.warn("Optimization may have not converged");
-      ss << " max_rhat: " << max_rhat << " rhat_cut: " << rhat_cut << "\n";
-      // avarage parameters from the last eval_window param iterations
-      for(int i = 0; i < num_chains; i++){
-        variational_obj_vec[i].set_approx_params(
-          hist_vector[i].block(0, T0 - eval_window + 1, n_approx_params, eval_window).rowwise().mean());
-      }
-    }
-    else {
-      ss << "Start secondary iteration at step #: " << T0 << "\n";
-      for(int n_post_iter = T0; n_post_iter < max_runs; n_post_iter++){
-        eta_scaled = eta / sqrt(static_cast<double>(n_post_iter + 1));
-        for (int n_chain = 0; n_chain < num_chains; n_chain++){
-          calc_ELBO_grad(variational_obj_vec[n_chain], elbo_grad_vec[n_chain], logger);
-          elbo_grad_square_vec[n_chain] = 0.9 * elbo_grad_square_vec[n_chain]
-                                          + 0.1 * elbo_grad_vec[n_chain].square();
-
-          variational_obj_vec[n_chain] += eta_scaled * elbo_grad_vec[n_chain] / 
-                                          elbo_grad_square_vec[n_chain].sqrt();
-
-          hist_vector[n_chain].col(n_post_iter) = variational_obj_vec[n_chain].return_approx_params();
-        }
-        if ((n_post_iter - T0) % eval_window == 0 && (n_post_iter - T0) > 0) {
-          double min_ess = std::numeric_limits<double>::infinity(), max_mcse = std::numeric_limits<double>::lowest();
-          for(int k = 0; k < n_approx_params; k++){
+      if (std::isnan(k_conv) && n_iter % check_frequency == 0){
+        double min_rhat = std::numeric_limits<double>::infinity();
+        for(int grid_i = 0; grid_i < num_grid_points; grid_i++){
+          // create equally spaced grid points from min_window_size to 0.95k
+          int rhat_lookback_iters = min_window_size + num_grid_points * 
+                                (static_cast<int>(0.95 * n_iter) - 
+                                min_window_size) / (num_grid_points - 1);
+          
+          double max_rhat = std::numeric_limits<double>::lowest();
+          // rhat equals the highest Rhat between variational parameters
+          for(int k = 0; k < n_approx_params; k++) {
             std::vector<const double*> hist_ptrs;
             std::vector<size_t> chain_length;
+            const int split_point = n_iter/2;
             if(num_chains == 1){
-              // split chain calculation
-              chain_length.assign(2, static_cast<size_t>((n_post_iter - T0 + 1) / 2));
-              hist_ptrs.push_back(hist_vector[0].row(k).data() + T0);
-              hist_ptrs.push_back(hist_ptrs[0] + chain_length[0]); 
+              // use split rhat
+              chain_length.assign(2, static_cast<size_t>(rhat_lookback_iters / 2));
+              hist_ptrs.push_back(hist_vector[0].row(k).data() + n_iter - rhat_lookback_iters + 1);
+              hist_ptrs.push_back(hist_ptrs[0] + n_iter - rhat_lookback_iters / 2 + 1);
             }
-            else {
+            else{
               for(int i = 0; i < num_chains; i++){
-                chain_length.push_back(static_cast<size_t>(n_post_iter - T0 + 1));
-                hist_ptrs.push_back(hist_vector[i].row(k).data() + T0);
+                //chain_length.push_back(static_cast<size_t>(n_iter * window_size));
+                //hist_ptrs.push_back(hist_vector[i].row(k).data());
+
+                // multi-chain split rhat (split each chain into 2)
+                chain_length.insert(chain_length.end(), 2, static_cast<size_t>(rhat_lookback_iters / 2));
+                hist_ptrs.push_back(hist_vector[i].row(k).data() + n_iter - rhat_lookback_iters + 1);
+                hist_ptrs.push_back(hist_vector[i].row(k).data() +  n_iter - rhat_lookback_iters / 2 + 1);
               }
             }
-            double ess, mcse;
-            ESS_MCSE(ess, mcse, hist_ptrs, chain_length);
-            min_ess = std::min<double>(min_ess, ess);
-            max_mcse = std::max<double>(max_mcse, mcse);
+            rhat = stan::analyze::compute_potential_scale_reduction(hist_ptrs, chain_length);
+            max_rhat = std::max<double>(max_rhat, rhat);
           }
-          if(max_mcse < mcse_cut && min_ess > ess_cut){
-            ss << "Second iteration break condition reached at iteration # "
-               << n_post_iter << "\n";
-            ss << "min ESS: " << min_ess << " max MCSE: " << max_mcse << "\n";
-            for(int i = 0; i < num_chains; i++){
-                variational_obj_vec[i].set_approx_params(
-                hist_vector[i].block(0, T0, n_approx_params, n_post_iter - T0 + 1).rowwise().mean());
-            }
-            break;
+          if (max_rhat <= min_rhat){
+            k_conv = n_iter - rhat_lookback_iters + 1;
+            w_check = rhat_lookback_iters;
           }
+        }
+        if (min_rhat > 1.1){
+          // if we can't meet the convergence criteria, reset condition variables
+          k_conv = std::numeric_limits<int>::quiet_NaN();
+          w_check = std::numeric_limits<int>::quiet_NaN();
+        }
+      }
+
+      if (!std::isnan(k_conv) && (n_iter - k_conv + 1 == w_check)){
+        for(int i = 0; i < num_chains; i++){
+          variational_obj_vec[i].set_approx_params(hist_vector[i].block(0, n_iter - w_check + 1, n_approx_params, w_check).rowwise().mean());
+          // set params per chain to iterate average values
+        }
+
+        // pool and average all chain results into return value
+        variational.set_to_zero();
+        for(int i = 0; i < num_chains; i++){
+          variational += 1.0 / num_chains * variational_obj_vec[i];
+        }
+
+        double ess, mcse, min_ess, max_mcse;
+        min_ess = std::numeric_limits<double>::infinity();
+        max_mcse = std::numeric_limits<double>::lowest();
+
+        for(int k = 0; k < num_approx_params; k++){
+          std::vector<const double*> hist_ptrs;
+          std::vector<size_t> chain_length;
+          for(int i = 0; i < num_chains; i++){
+            chain_length.push_back(static_cast<size_t>(w_check));
+            hist_ptrs.push_back(hist_vector[i].row(k).data() + n_iter - w_check + 1);
+          }
+          ESS_MCSE(ess, mcse, hist_ptrs, chain_length);
+          if constexpr(std::is_same<Q, normal_meanfield>::value){
+            mcse /= std::exp(hist_vector[0].block(model_dim + k, n_iter - w_check + 1, model_dim + k, w_check).rowwise().mean());
+            // TODO: handle multiple chains
+            // Currently just uses mean of the first chain
+          }
+          min_ess = std::min<double>(min_ess, ess);
+          max_mcse = std::max<double>(max_mcse, mcse);
+        }
+        if (max_mcse < mcse_cut && min_ess >= ess_cut){
+          success = true;
+          break;
+        }
+        else{
+          auto 
         }
       }
     }
-    variational.set_to_zero();
-    for(int i = 0; i < num_chains; i++){
-      variational += 1.0 / num_chains * variational_obj_vec[i];
-    }
     ss << "Finished optimization" << "\n";
-    /*cont_params_ = variational.mean();
-    std::vector<double> cont_vector(cont_params_.size());
-    for (int i = 0; i < cont_params_.size(); ++i)
-      cont_vector.at(i) = cont_params_(i);
-    std::vector<int> disc_vector;
-    std::vector<double> values;
 
-    std::stringstream msg;
-    model_.write_array(rng_, cont_vector, disc_vector, values, true, true,
-                       &msg);
-    if (msg.str().length() > 0)*/
     for(int i = 0; i < num_chains; i++){
       ss << "Chain " << i << "mean:\n" << variational_obj_vec[i].mean() << "\n";
     }
