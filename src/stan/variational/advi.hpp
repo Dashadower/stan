@@ -697,7 +697,7 @@ class advi {
           break;
         }
         else{
-          w_check *= optimize_duration.count() / mcse_duration.count();
+          w_check *= 1 + 1 / std::sqrt(optimize_duration.count() / mcse_duration.count());
         }
       }
     }
