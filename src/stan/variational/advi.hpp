@@ -423,7 +423,7 @@ class advi {
     int num_chains = sizes.size();
     size_t num_draws = sizes[0];
     for (int chain = 1; chain < num_chains; ++chain) {
-      num_draws = std::min(num_draws, sizes[chain]);
+      num_draws = std::min(num_draws, sizes[chain]);1
     }
 
     if (num_draws < 4) {
@@ -586,9 +586,9 @@ class advi {
     elbo_grad_vec.reserve(num_chains);
 
     for(int i = 0; i < num_chains; i++){
-      hist_vector.push_back(histMat(n_approx_params, max_runs));
+      hist_vector.push_back(histMat(num_approx_params, max_runs));
       variational_obj_vec.push_back(Q(cont_params_));
-      elbo_grad_vec.push_back(Q(dim));
+      elbo_grad_vec.push_back(Q(model_dim));
     }
 
     // FASO specific variables
@@ -620,7 +620,7 @@ class advi {
                                 min_window_size) / (num_grid_points - 1);
           
           double max_rhat = std::numeric_limits<double>::lowest(); // highest rhat across parameters
-          for(int k = 0; k < n_approx_params; k++) {
+          for(int k = 0; k < num_approx_params; k++) {
             std::vector<const double*> hist_ptrs;
             std::vector<size_t> chain_length;
             const int split_point = n_iter/2;
@@ -659,7 +659,7 @@ class advi {
 
       if (!std::isnan(k_conv) && (n_iter - k_conv + 1 == w_check)){
         for(int i = 0; i < num_chains; i++){
-          variational_obj_vec[i].set_approx_params(hist_vector[i].block(0, n_iter - w_check + 1, n_approx_params, w_check).rowwise().mean());
+          variational_obj_vec[i].set_approx_params(hist_vector[i].block(0, n_iter - w_check + 1, num_approx_params, w_check).rowwise().mean());
           // set parameters per chain to iterate average values
         }
 
@@ -683,7 +683,8 @@ class advi {
           }
           ESS_MCSE(ess, mcse, hist_ptrs, chain_length);
           if constexpr(std::is_same<Q, normal_meanfield>::value){ // I know, it probably won't work
-            mcse /= std::exp(hist_vector[0].block(model_dim + k, n_iter - w_check + 1, model_dim + k, w_check).rowwise().mean());
+            mcse /= std::exp(hist_vector[0].row(model_dim + k).tail(w_check).mean());
+            //mcse /= std::exp(hist_vector[0].block(model_dim + k, n_iter - w_check + 1, model_dim + k, w_check).rowwise().mean());
             // TODO: handle multiple chains
             // Currently just uses mean of the first chain
           }
@@ -712,7 +713,7 @@ class advi {
     }
     ss << "----\nQ variational:\n" << variational.mean() << "\n----\n";
     ss << "Num of Model params: " << model_dim << "\n";
-    ss << "Num of Approx params: " << n_approx_params << "\n";
+    ss << "Num of Approx params: " << num_approx_params << "\n";
     logger.info(ss);
   }
 
