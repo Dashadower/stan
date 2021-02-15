@@ -619,7 +619,7 @@ class advi {
                                 (static_cast<int>(0.95 * n_iter) - 
                                 min_window_size) / (num_grid_points - 1);
           
-          double max_rhat = std::numeric_limits<double>::lowest(); // highest rhat across parameters
+          double rhat, max_rhat = std::numeric_limits<double>::lowest(); // highest rhat across parameters
           for(int k = 0; k < num_approx_params; k++) {
             std::vector<const double*> hist_ptrs;
             std::vector<size_t> chain_length;
@@ -706,7 +706,7 @@ class advi {
       ss << "Optimization finished succesfully\n";
     }
     else{
-      ss << "Optimization failed. Results are probably unreliable.\n"
+      ss << "Optimization failed. Results are probably unreliable.\n";
     }
     for(int i = 0; i < num_chains; i++){
       ss << "Chain " << i << "mean:\n" << variational_obj_vec[i].mean() << "\n";
