@@ -423,7 +423,7 @@ class advi {
     int num_chains = sizes.size();
     size_t num_draws = sizes[0];
     for (int chain = 1; chain < num_chains; ++chain) {
-      num_draws = std::min(num_draws, sizes[chain]);1
+      num_draws = std::min(num_draws, sizes[chain]);
     }
 
     if (num_draws < 4) {
