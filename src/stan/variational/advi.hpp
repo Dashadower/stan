@@ -601,7 +601,7 @@ class advi {
     std::chrono::duration<double> optimize_duration(0);
     std::chrono::duration<double> mcse_duration(0);
     for (int n_iter = 0; n_iter < max_runs; n_iter++){
-      auto start = std::chrono::steady_clock::now();
+      auto start_time = std::chrono::steady_clock::now();
       for (int n_chain = 0; n_chain < num_chains; n_chain++){
         calc_ELBO_grad(variational_obj_vec[n_chain], elbo_grad_vec[n_chain], logger);
         variational_obj_vec[n_chain] -= eta * elbo_grad_vec[n_chain];
@@ -609,8 +609,9 @@ class advi {
 
         hist_vector[n_chain].col(n_iter) = variational_obj_vec[n_chain].return_approx_params();
       }
-      optimize_duration += std::chrono::steady_clock::now() - start;
+      optimize_duration += std::chrono::steady_clock::now() - start_time;
       optimize_duration /= num_chains;
+      optimize_duration /= n_iter;
 
       if (std::isnan(k_conv) && n_iter % check_frequency == 0){
         double min_rhat = std::numeric_limits<double>::infinity();
@@ -674,6 +675,7 @@ class advi {
         min_ess = std::numeric_limits<double>::infinity();
         max_mcse = std::numeric_limits<double>::lowest();
 
+        start_time = std::chrono::steady_clock::now();
         for(int k = 0; k < num_approx_params; k++){
           std::vector<const double*> hist_ptrs;
           std::vector<size_t> chain_length;
@@ -690,17 +692,23 @@ class advi {
           min_ess = std::min<double>(min_ess, ess);
           max_mcse = std::max<double>(max_mcse, mcse);
         }
+        mcse_duration = std::chrono::steady_clock::now() - start_time;
+        mcse_duration /= w_check;
         if (max_mcse < mcse_cut && min_ess >= ess_cut){
           success = true;
           break;
         }
         else{
-          auto 
+          w_check *= optimize_duration.count() / mcse_duration.count();
         }
       }
     }
-    ss << "Finished optimization" << "\n";
-
+    if (success){
+      ss << "Optimization finished succesfully\n";
+    }
+    else{
+      ss << "Optimization failed. Results are probably unreliable.\n"
+    }
     for(int i = 0; i < num_chains; i++){
       ss << "Chain " << i << "mean:\n" << variational_obj_vec[i].mean() << "\n";
     }
