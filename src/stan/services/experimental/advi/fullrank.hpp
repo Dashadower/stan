@@ -33,12 +33,11 @@ namespace advi {
  *   of ELBO
  * @param[in] max_iterations maximum number of iterations
  * @param[in] eta stepsize scaling parameter for variational inference
- * @param[in] eval_window Interval to calculate termination conditions
- * @param[in] window_size Proportion of eval_window samples to calculate
- *   Rhat for termination condition
- * @param[in] rhat_cut Rhat termination criteria
+ * @param[in] min_window_size Minimum size of window to produce optimal window size
+ * @param[in] check_frequency Frequency to check for convergence
+ * @param[in] num_grid_points Number of iterate values to calculate min(Rhat)
  * @param[in] mcse_cut MCSE termination criteria
- * @param[in] ess_cut effective sample size termination criteria
+ * @param[in] ess_cut effective sample size termination criteria, equals min_sample_size
  * @param[in] num_chains Number of VI chains to run
  * @param[in] adapt_engaged adaptation engaged?
  * @param[in] adapt_iterations number of iterations for eta adaptation
@@ -55,8 +54,8 @@ template <class Model>
 int fullrank(Model& model, const stan::io::var_context& init,
               unsigned int random_seed, unsigned int chain, double init_radius,
               int grad_samples, int elbo_samples, int max_iterations,
-              double eta, int eval_window, double window_size, double rhat_cut, 
-              double mcse_cut, double ess_cut, int num_chains, 
+              double eta, int min_window_size, int check_frequency, int num_grid_points,
+              double mcse_cut, double ess_cut, int num_chains,
               bool adapt_engaged, int adapt_iterations, int output_samples,
               callbacks::interrupt& interrupt, callbacks::logger& logger,
               callbacks::writer& init_writer,
