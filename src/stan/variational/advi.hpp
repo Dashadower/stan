@@ -438,8 +438,8 @@ class advi {
     }
 
     // FASO specific variables
-    int k_conv = std::numeric_limits<int>::quiet_NaN();
-    int w_check = std::numeric_limits<int>::quiet_NaN();
+    int k_conv = -1; // here -1 is just set to represent 'null' or 'nan'
+    int w_check = -1;
     bool success = false;
     int iterations_ran = 0;
     //
@@ -460,16 +460,15 @@ class advi {
       optimize_duration += std::chrono::steady_clock::now() - start_time;
       optimize_duration /= num_chains * n_iter;
 
-      if (std::isnan(k_conv) && n_iter % check_frequency == 0){
+      if (k_conv < 0 && n_iter % check_frequency == 0 && n_iter > 0){
         std::stringstream dbg;
         dbg << "Current iteration: " << n_iter << "\n";
         logger.info(dbg);
         double min_chain_rhat = std::numeric_limits<double>::infinity(); // lowest reported rhat value across windows
         for(int grid_i = 0; grid_i < num_grid_points; grid_i++){
           // create equally spaced grid points from min_window_size to 0.95k
-          int rhat_lookback_iters = min_window_size + num_grid_points * 
-                                (static_cast<int>(0.95 * n_iter) - 
-                                min_window_size) / (num_grid_points - 1);
+          int rhat_lookback_iters = min_window_size + grid_i * 
+                                static_cast<int>(0.95 * n_iter - min_window_size) / (num_grid_points - 1);
           
           double rhat, max_rhat = std::numeric_limits<double>::lowest(); // highest rhat across parameters
           for(int k = 0; k < num_approx_params; k++) {
@@ -504,14 +503,14 @@ class advi {
         }
         if (min_chain_rhat > 1.1){
           // if we can't meet the convergence criteria, reset condition variables
-          k_conv = std::numeric_limits<int>::quiet_NaN();
-          w_check = std::numeric_limits<int>::quiet_NaN();
+          k_conv = -1;
+          w_check = -1;
         }
       }
 
-      if (!std::isnan(k_conv) && (n_iter - k_conv + 1 == w_check)){
+      if (k_conv > 0 && (n_iter - k_conv + 1 == w_check)){
         for(int i = 0; i < num_chains; i++){
-          variational_obj_vec[i].set_approx_params(hist_vector[i].block(0, n_iter - w_check + 1, num_approx_params, w_check).rowwise().mean());
+          variational_obj_vec[i].set_approx_params(hist_vector[i].block(0, n_iter - w_check, num_approx_params, w_check).rowwise().mean());
           // set parameters per chain to iterate average values
         }
 
@@ -520,29 +519,37 @@ class advi {
         for(int i = 0; i < num_chains; i++){
           variational += 1.0 / num_chains * variational_obj_vec[i];
         }
-
+        logger.info("checking\n");
         double ess, mcse, min_ess, max_mcse;
         min_ess = std::numeric_limits<double>::infinity(); // min ess across all chains
         max_mcse = std::numeric_limits<double>::lowest(); // max mcse across all chains
 
         start_time = std::chrono::steady_clock::now();
+        logger.info(std::to_string(num_approx_params));
         for(int k = 0; k < num_approx_params; k++){
           std::vector<const double*> hist_ptrs;
           std::vector<size_t> chain_length;
           for(int i = 0; i < num_chains; i++){
             chain_length.push_back(static_cast<size_t>(w_check));
-            hist_ptrs.push_back(hist_vector[i].row(k).data() + n_iter - w_check + 1);
+            hist_ptrs.push_back(hist_vector[i].row(k).data() + n_iter - w_check);
           }
+          logger.info("start");
           ESS_MCSE(ess, mcse, hist_ptrs, chain_length);
-          if (std::is_same<Q, normal_meanfield>::value){ // I know, it probably won't work
-            mcse /= std::exp(hist_vector[0].row(model_dim + k).tail(w_check).mean());
+          logger.info("checking??\n");
+          if (std::is_same<Q, normal_meanfield>::value && k < model_dim){ // I know, it probably won't work
+            // divide MCSE of mu by exp(sigma);
+            mcse /= std::exp(hist_vector[0].row(k + model_dim).tail(w_check).mean());
+            //sigma corresponding to mu is k + model_dim
+
             //mcse /= std::exp(hist_vector[0].block(model_dim + k, n_iter - w_check + 1, model_dim + k, w_check).rowwise().mean());
             // TODO: handle multiple chains
             // Currently just uses mean of the first chain
           }
+          logger.info("done");
           min_ess = std::min<double>(min_ess, ess);
           max_mcse = std::max<double>(max_mcse, mcse);
         }
+        logger.info("checking2\n");
         mcse_duration = std::chrono::steady_clock::now() - start_time;
         mcse_duration /= w_check;
         if (max_mcse < mcse_cut && min_ess >= ess_cut){
@@ -552,10 +559,11 @@ class advi {
         else{
           w_check *= 1 + 1 / std::sqrt(optimize_duration.count() / mcse_duration.count());
         }
+        logger.info("Second finished\n");
       }
     }
     for(int i = 0; i < num_chains; i++){
-      variational_obj_vec[i].set_approx_params(hist_vector[i].block(0, iterations_ran - w_check + 1, num_approx_params, w_check).rowwise().mean());
+      variational_obj_vec[i].set_approx_params(hist_vector[i].block(0, iterations_ran - w_check, num_approx_params, w_check).rowwise().mean());
       // set parameters per chain to iterate average values
     }
 

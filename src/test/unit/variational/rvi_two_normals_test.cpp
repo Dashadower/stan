@@ -33,18 +33,22 @@ TEST(rvi_test, two_normals_meanfield) {
   cont_params(1) = 0.0;
 
   // ADVI
-  int n_monte_carlo_grad = 10;
+  int n_monte_carlo_grad = 1;
   int n_monte_carlo_elbo = 100;
-  int eval_elbo = 10;
-  int n_posterior_samples = 100;
+  int iter = 10000;
+  double eta = 0.01;
+  double mcse_cut = 0.02;
+  double ess_cut = 20;
+  int check_frequency = 200;
+  int min_window_size = 200;
+  int num_grid_points = 5;
+  int num_chains = 1;
+  int n_posterior_samples = 1000;
   
   stan::variational::advi<Model, stan::variational::normal_meanfield, rng_t>
     test_advi(my_model, cont_params, base_rng, n_monte_carlo_grad,
 	      n_monte_carlo_elbo, n_posterior_samples);
 
-  int eval_window = 100;
-  double window_size = 0.5;
-  test_advi.run(1.0, true, 250, 10000,
-		eval_window, window_size, 1.1, 0.02, 20, 4, logger,
+  test_advi.run(eta, iter, min_window_size, ess_cut, mcse_cut, check_frequency, num_grid_points, num_chains,logger,
 		stdout_writer, stdout_writer); 
 }
