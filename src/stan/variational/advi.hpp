@@ -449,7 +449,7 @@ class advi {
       auto start_time = std::chrono::steady_clock::now();
       for (int n_chain = 0; n_chain < num_chains; n_chain++){
         calc_ELBO_grad(variational_obj_vec[n_chain], elbo_grad_vec[n_chain], logger);
-        variational_obj_vec[n_chain] -= eta * elbo_grad_vec[n_chain];
+        variational_obj_vec[n_chain] += -eta * elbo_grad_vec[n_chain];
         // stochastic update
 
         hist_vector[n_chain].col(n_iter) = variational_obj_vec[n_chain].return_approx_params();
