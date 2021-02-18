@@ -295,25 +295,23 @@ class advi {
    * Runs ADVI and writes to output.
    *
    * @param[in] eta eta parameter of stepsize sequence
-   * @param[in] adapt_engaged boolean flag for eta adaptation
-   * @param[in] adapt_iterations number of iterations for eta adaptation
    * @param[in] max_iterations max number of iterations to run algorithm
    * @param[in] eval_window Interval to calculate termination conditions
-   * @param[in] window_size Proportion of eval_window samples to calculate
-   * Rhat for termination condition
-   * @param[in] rhat_cut Rhat termination criteria
-   * @param[in] mcse_cut MCSE termination criteria
-   * @param[in] ess_cut effective sample size termination criteria
+   * @param[in] num_chains Number of VI chains to run
+   * @param[in] ess_cut Minimum effective sample size threshold
+   * @param[in] mcse_cut MCSE error threshold
+   * @param[in] check_frequency Frequency to check for convergence 
+   * @param[in] num_grid_points Number of iterate values to calculate min(Rhat)
+   * in grid search 
    * @param[in] num_chains Number of VI chains to run
    * @param[in,out] logger logger for messages
-   * @param[in,out] parameter_writer writer for parameters
-   *   (typically to file)
+   * @param[in,out] parameter_writer writer for parameters (typically to file)
    * @param[in,out] diagnostic_writer writer for diagnostic information
    */
-  int run(double eta, bool adapt_engaged, int adapt_iterations,
-          int max_iterations, int eval_window, double window_size,
-          double rhat_cut, double mcse_cut, double ess_cut, int num_chains,
-	        callbacks::logger& logger,
+  int run(double eta,
+          int max_iterations, int eval_window, double ess_cut, double mcse_cut, 
+          int check_frequency, int num_grid_points, int num_chains, 
+          callbacks::logger& logger,
           callbacks::writer& parameter_writer,
           callbacks::writer& diagnostic_writer) const {
     diagnostic_writer("iter,time_in_seconds,ELBO");
@@ -321,18 +319,8 @@ class advi {
     // Initialize variational approximation
     Q variational = Q(cont_params_);
 
-    if (adapt_engaged) {
-      eta = adapt_eta(variational, adapt_iterations, logger);
-      parameter_writer("Stepsize adaptation complete.");
-      std::stringstream ss;
-      ss << "eta = " << eta;
-      parameter_writer(ss.str());
-    }
-
-    run_rvi(variational, eta,
-	          max_iterations, eval_window, window_size,
-	          rhat_cut, mcse_cut, ess_cut, num_chains,
-	          logger);
+    run_rvi(variational, eta, max_iterations, eval_window, ess_cut, mcse_cut, 
+            check_frequency, num_grid_points, num_chains, logger);
 
     // Write posterior mean of variational approximations.
     cont_params_ = variational.mean();
@@ -682,7 +670,7 @@ class advi {
             hist_ptrs.push_back(hist_vector[i].row(k).data() + n_iter - w_check + 1);
           }
           ESS_MCSE(ess, mcse, hist_ptrs, chain_length);
-          if constexpr(std::is_same<Q, normal_meanfield>::value){ // I know, it probably won't work
+          if (std::is_same<Q, normal_meanfield>::value){ // I know, it probably won't work
             mcse /= std::exp(hist_vector[0].row(model_dim + k).tail(w_check).mean());
             //mcse /= std::exp(hist_vector[0].block(model_dim + k, n_iter - w_check + 1, model_dim + k, w_check).rowwise().mean());
             // TODO: handle multiple chains
