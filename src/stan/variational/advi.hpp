@@ -150,153 +150,11 @@ class advi {
   }
 
   /**
-   * Heuristic grid search to adapt eta to the scale of the problem.
-   *
-   * @param[in] variational initial variational distribution.
-   * @param[in] adapt_iterations number of iterations to spend doing stochastic
-   * gradient ascent at each proposed eta value.
-   * @param[in,out] logger logger for messages
-   * @return adapted (tuned) value of eta via heuristic grid search
-   * @throw std::domain_error If either (a) the initial ELBO cannot be
-   * computed at the initial variational distribution, (b) all step-size
-   * proposals in eta_sequence fail.
-   */
-  double adapt_eta(Q& variational, int adapt_iterations,
-                   callbacks::logger& logger) const {
-    static const char* function = "stan::variational::advi::adapt_eta";
-
-    stan::math::check_positive(function, "Number of adaptation iterations",
-                               adapt_iterations);
-
-    logger.info("Begin eta adaptation.");
-
-    // Sequence of eta values to try during adaptation
-    const int eta_sequence_size = 5;
-    double eta_sequence[eta_sequence_size] = {100, 10, 1, 0.1, 0.01};
-
-    // Initialize ELBO tracking variables
-    double elbo = -std::numeric_limits<double>::max();
-    double elbo_best = -std::numeric_limits<double>::max();
-    double elbo_init;
-    try {
-      elbo_init = calc_ELBO(variational, logger);
-    } catch (const std::domain_error& e) {
-      const char* name
-          = "Cannot compute ELBO using the initial "
-            "variational distribution.";
-      const char* msg1
-          = "Your model may be either "
-            "severely ill-conditioned or misspecified.";
-      stan::math::throw_domain_error(function, name, "", msg1);
-    }
-
-    // Variational family to store gradients
-    Q elbo_grad = Q(model_.num_params_r());
-
-    // Adaptive step-size sequence
-    Q history_grad_squared = Q(model_.num_params_r());
-    double tau = 1.0;
-    double pre_factor = 0.9;
-    double post_factor = 0.1;
-
-    double eta_best = 0.0;
-    double eta;
-    double eta_scaled;
-
-    bool do_more_tuning = true;
-    int eta_sequence_index = 0;
-    while (do_more_tuning) {
-      // Try next eta
-      eta = eta_sequence[eta_sequence_index];
-
-      int print_progress_m;
-      for (int iter_tune = 1; iter_tune <= adapt_iterations; ++iter_tune) {
-        print_progress_m = eta_sequence_index * adapt_iterations + iter_tune;
-        variational ::print_progress(print_progress_m, 0,
-                                     adapt_iterations * eta_sequence_size,
-                                     adapt_iterations, true, "", "", logger);
-
-        // (ROBUST) Compute gradient of ELBO. It's OK if it diverges.
-        // We'll try a smaller eta.
-        try {
-          calc_ELBO_grad(variational, elbo_grad, logger);
-        } catch (const std::domain_error& e) {
-          elbo_grad.set_to_zero();
-        }
-
-        // Update step-size
-        if (iter_tune == 1) {
-          history_grad_squared += elbo_grad.square();
-        } else {
-          history_grad_squared = pre_factor * history_grad_squared
-                                 + post_factor * elbo_grad.square();
-        }
-        eta_scaled = eta / sqrt(static_cast<double>(iter_tune));
-        // Stochastic gradient update
-        variational
-            += eta_scaled * elbo_grad / (tau + history_grad_squared.sqrt());
-      }
-
-      // (ROBUST) Compute ELBO. It's OK if it has diverged.
-      try {
-        elbo = calc_ELBO(variational, logger);
-      } catch (const std::domain_error& e) {
-        elbo = -std::numeric_limits<double>::max();
-      }
-
-      // Check if:
-      // (1) ELBO at current eta is worse than the best ELBO
-      // (2) the best ELBO hasn't gotten worse than the initial ELBO
-      if (elbo < elbo_best && elbo_best > elbo_init) {
-        std::stringstream ss;
-        ss << "Success!"
-           << " Found best value [eta = " << eta_best << "]";
-        if (eta_sequence_index < eta_sequence_size - 1)
-          ss << (" earlier than expected.");
-        else
-          ss << ".";
-        logger.info(ss);
-        logger.info("");
-        do_more_tuning = false;
-      } else {
-        if (eta_sequence_index < eta_sequence_size - 1) {
-          // Reset
-          elbo_best = elbo;
-          eta_best = eta;
-        } else {
-          // No more eta values to try, so use current eta if it
-          // didn't diverge or fail if it did diverge
-          if (elbo > elbo_init) {
-            std::stringstream ss;
-            ss << "Success!"
-               << " Found best value [eta = " << eta_best << "].";
-            logger.info(ss);
-            logger.info("");
-            eta_best = eta;
-            do_more_tuning = false;
-          } else {
-            const char* name = "All proposed step-sizes";
-            const char* msg1
-                = "failed. Your model may be either "
-                  "severely ill-conditioned or misspecified.";
-            stan::math::throw_domain_error(function, name, "", msg1);
-          }
-        }
-        // Reset
-        history_grad_squared.set_to_zero();
-      }
-      ++eta_sequence_index;
-      variational = Q(cont_params_);
-    }
-    return eta_best;
-  }
-
-  /**
    * Runs ADVI and writes to output.
    *
    * @param[in] eta eta parameter of stepsize sequence
    * @param[in] max_iterations max number of iterations to run algorithm
-   * @param[in] eval_window Interval to calculate termination conditions
+   * @param[in] min_window_size Minimum window  size to calculate optimal Rhat
    * @param[in] num_chains Number of VI chains to run
    * @param[in] ess_cut Minimum effective sample size threshold
    * @param[in] mcse_cut MCSE error threshold
@@ -309,7 +167,7 @@ class advi {
    * @param[in,out] diagnostic_writer writer for diagnostic information
    */
   int run(double eta,
-          int max_iterations, int eval_window, double ess_cut, double mcse_cut, 
+          int max_iterations, int min_window_size, double ess_cut, double mcse_cut, 
           int check_frequency, int num_grid_points, int num_chains, 
           callbacks::logger& logger,
           callbacks::writer& parameter_writer,
@@ -319,7 +177,7 @@ class advi {
     // Initialize variational approximation
     Q variational = Q(cont_params_);
 
-    run_rvi(variational, eta, max_iterations, eval_window, ess_cut, mcse_cut, 
+    run_rvi(variational, eta, max_iterations, min_window_size, ess_cut, mcse_cut, 
             check_frequency, num_grid_points, num_chains, logger);
 
     // Write posterior mean of variational approximations.
@@ -531,7 +389,7 @@ class advi {
    * @param[in] variational The variational class
    * @param[in] eta Learning rate(stepsize, constant)
    * @param[in] max_runs Max number of VI iterations
-   * @param[in] min_window_size Minimum window size to calculate Rhat
+   * @param[in] min_window_size Minimum window size to calculate optimal Rhat
    * @param[in] ess_cut Minimum effective sample size threshold
    * @param[in] mcse_cut MCSE error threshold
    * @param[in] check_frequency Frequency to check for convergence 

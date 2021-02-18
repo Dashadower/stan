@@ -39,8 +39,6 @@ namespace advi {
  * @param[in] mcse_cut MCSE termination criteria
  * @param[in] ess_cut effective sample size termination criteria, equals min_sample_size
  * @param[in] num_chains Number of VI chains to run
- * @param[in] adapt_engaged adaptation engaged?
- * @param[in] adapt_iterations number of iterations for eta adaptation
  * @param[in] output_samples number of posterior samples to draw and
  *   save
  * @param[in,out] interrupt callback to be called every iteration
@@ -56,7 +54,7 @@ int fullrank(Model& model, const stan::io::var_context& init,
               int grad_samples, int elbo_samples, int max_iterations,
               double eta, int min_window_size, int check_frequency, int num_grid_points,
               double mcse_cut, double ess_cut, int num_chains,
-              bool adapt_engaged, int adapt_iterations, int output_samples,
+              int output_samples,
               callbacks::interrupt& interrupt, callbacks::logger& logger,
               callbacks::writer& init_writer,
               callbacks::writer& parameter_writer,
@@ -83,9 +81,9 @@ int fullrank(Model& model, const stan::io::var_context& init,
                           boost::ecuyer1988>
       cmd_advi(model, cont_params, rng, grad_samples, elbo_samples,
                output_samples);
-  cmd_advi.run(eta, adapt_engaged, adapt_iterations,
-	       max_iterations, eval_window, window_size, rhat_cut, mcse_cut,
-	       ess_cut, num_chains, logger, parameter_writer, diagnostic_writer);
+  cmd_advi.run(eta, max_iterations, min_window_size, ess_cut, mcse_cut,
+               check_frequency, num_grid_points,  num_chains, logger, 
+               parameter_writer, diagnostic_writer);
 
   return 0;
 }
