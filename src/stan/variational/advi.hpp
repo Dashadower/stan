@@ -445,11 +445,12 @@ class advi {
 
     std::chrono::duration<double> optimize_duration(0);
     std::chrono::duration<double> mcse_duration(0);
+    logger.info("Start FASO loop\n");
     for (int n_iter = 0; n_iter < max_runs; n_iter++){
       auto start_time = std::chrono::steady_clock::now();
       for (int n_chain = 0; n_chain < num_chains; n_chain++){
         calc_ELBO_grad(variational_obj_vec[n_chain], elbo_grad_vec[n_chain], logger);
-        variational_obj_vec[n_chain] += -eta * elbo_grad_vec[n_chain];
+        variational_obj_vec[n_chain] += eta * elbo_grad_vec[n_chain];
         // stochastic update
 
         hist_vector[n_chain].col(n_iter) = variational_obj_vec[n_chain].return_approx_params();
@@ -458,6 +459,9 @@ class advi {
       optimize_duration /= num_chains * n_iter;
 
       if (std::isnan(k_conv) && n_iter % check_frequency == 0){
+        std::stringstream dbg;
+        dbg << "Current iteration: " << n_iter << "\n";
+        logger.info(dbg);
         double min_chain_rhat = std::numeric_limits<double>::infinity(); // lowest reported rhat value across windows
         for(int grid_i = 0; grid_i < num_grid_points; grid_i++){
           // create equally spaced grid points from min_window_size to 0.95k
