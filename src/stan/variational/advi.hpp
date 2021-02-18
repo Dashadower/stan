@@ -441,12 +441,14 @@ class advi {
     int k_conv = std::numeric_limits<int>::quiet_NaN();
     int w_check = std::numeric_limits<int>::quiet_NaN();
     bool success = false;
+    int iterations_ran = 0;
     //
 
     std::chrono::duration<double> optimize_duration(0);
     std::chrono::duration<double> mcse_duration(0);
     logger.info("Start FASO loop\n");
     for (int n_iter = 0; n_iter < max_runs; n_iter++){
+      iterations_ran = n_iter;
       auto start_time = std::chrono::steady_clock::now();
       for (int n_chain = 0; n_chain < num_chains; n_chain++){
         calc_ELBO_grad(variational_obj_vec[n_chain], elbo_grad_vec[n_chain], logger);
@@ -552,6 +554,18 @@ class advi {
         }
       }
     }
+    for(int i = 0; i < num_chains; i++){
+      variational_obj_vec[i].set_approx_params(hist_vector[i].block(0, iterations_ran - w_check + 1, num_approx_params, w_check).rowwise().mean());
+      // set parameters per chain to iterate average values
+    }
+
+    // pool and average all chain results into single return value
+    variational.set_to_zero();
+    for(int i = 0; i < num_chains; i++){
+      variational += 1.0 / num_chains * variational_obj_vec[i];
+    }
+
+    ss << "k_conv: " << k_conv << " total iterations ran: " << iterations_ran << "\n";
     if (success){
       ss << "Optimization finished succesfully\n";
     }
@@ -559,7 +573,7 @@ class advi {
       ss << "Optimization failed. Results are probably unreliable.\n";
     }
     for(int i = 0; i < num_chains; i++){
-      ss << "Chain " << i << "mean:\n" << variational_obj_vec[i].mean() << "\n";
+      ss << "Chain " << i << " mean:\n" << variational_obj_vec[i].mean() << "\n";
     }
     ss << "----\nQ variational:\n" << variational.mean() << "\n----\n";
     ss << "Num of Model params: " << model_dim << "\n";
