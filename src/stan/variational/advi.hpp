@@ -509,6 +509,9 @@ class advi {
       }
 
       if (k_conv > 0 && (n_iter - k_conv + 1 == w_check)){
+        std::stringstream dbg2;
+        dbg2 << "Current iteration: " << n_iter << "\n";
+        logger.info(dbg2);
         for(int i = 0; i < num_chains; i++){
           variational_obj_vec[i].set_approx_params(hist_vector[i].block(0, n_iter - w_check, num_approx_params, w_check).rowwise().mean());
           // set parameters per chain to iterate average values
@@ -519,13 +522,11 @@ class advi {
         for(int i = 0; i < num_chains; i++){
           variational += 1.0 / num_chains * variational_obj_vec[i];
         }
-        logger.info("checking\n");
         double ess, mcse, min_ess, max_mcse;
         min_ess = std::numeric_limits<double>::infinity(); // min ess across all chains
         max_mcse = std::numeric_limits<double>::lowest(); // max mcse across all chains
 
         start_time = std::chrono::steady_clock::now();
-        logger.info(std::to_string(num_approx_params));
         for(int k = 0; k < num_approx_params; k++){
           std::vector<const double*> hist_ptrs;
           std::vector<size_t> chain_length;
@@ -533,9 +534,7 @@ class advi {
             chain_length.push_back(static_cast<size_t>(w_check));
             hist_ptrs.push_back(hist_vector[i].row(k).data() + n_iter - w_check);
           }
-          logger.info("start");
           ESS_MCSE(ess, mcse, hist_ptrs, chain_length);
-          logger.info("checking??\n");
           if (std::is_same<Q, normal_meanfield>::value && k < model_dim){ // I know, it probably won't work
             // divide MCSE of mu by exp(sigma);
             mcse /= std::exp(hist_vector[0].row(k + model_dim).tail(w_check).mean());
@@ -545,11 +544,9 @@ class advi {
             // TODO: handle multiple chains
             // Currently just uses mean of the first chain
           }
-          logger.info("done");
           min_ess = std::min<double>(min_ess, ess);
           max_mcse = std::max<double>(max_mcse, mcse);
         }
-        logger.info("checking2\n");
         mcse_duration = std::chrono::steady_clock::now() - start_time;
         mcse_duration /= w_check;
         if (max_mcse < mcse_cut && min_ess >= ess_cut){
@@ -559,7 +556,6 @@ class advi {
         else{
           w_check *= 1 + 1 / std::sqrt(optimize_duration.count() / mcse_duration.count());
         }
-        logger.info("Second finished\n");
       }
     }
     for(int i = 0; i < num_chains; i++){
