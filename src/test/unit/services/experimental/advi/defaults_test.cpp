@@ -58,31 +58,7 @@ TEST(experimental_advi_defaults, eta) {
   EXPECT_NO_THROW(eta::validate(1.0));
   EXPECT_THROW(eta::validate(0.0), std::invalid_argument);
 
-  EXPECT_FLOAT_EQ(1.0, eta::default_value());
-}
-
-TEST(experimental_advi_defaults, adapt_engaged) {
-  using stan::services::experimental::advi::adapt_engaged;
-  EXPECT_EQ("Boolean flag for eta adaptation.", adapt_engaged::description());
-
-  EXPECT_NO_THROW(adapt_engaged::validate(adapt_engaged::default_value()));
-  EXPECT_NO_THROW(adapt_engaged::validate(true));
-  EXPECT_NO_THROW(adapt_engaged::validate(false));
-
-  EXPECT_TRUE(adapt_engaged::default_value());
-}
-
-TEST(experimental_advi_defaults, adapt_iterations) {
-  using stan::services::experimental::advi::adapt_iterations;
-  EXPECT_EQ("Number of iterations for eta adaptation.",
-            adapt_iterations::description());
-
-  EXPECT_NO_THROW(
-      adapt_iterations::validate(adapt_iterations::default_value()));
-  EXPECT_NO_THROW(adapt_iterations::validate(1));
-  EXPECT_THROW(adapt_iterations::validate(0), std::invalid_argument);
-
-  EXPECT_EQ(50, adapt_iterations::default_value());
+  EXPECT_FLOAT_EQ(0.01, eta::default_value());
 }
 
 TEST(experimental_advi_defaults, eval_elbo) {

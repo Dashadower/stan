@@ -2,6 +2,10 @@
 #define STAN_VARIATIONAL_ADVI_HPP
 
 #include <stan/math.hpp>
+#include <stan/analyze/mcmc/autocovariance.hpp>
+#include <stan/analyze/mcmc/compute_effective_sample_size.hpp>
+#include <stan/analyze/mcmc/compute_potential_scale_reduction.hpp>
+#include <stan/analyze/mcmc/estimate_gpd_params.hpp>
 #include <stan/callbacks/logger.hpp>
 #include <stan/callbacks/writer.hpp>
 #include <stan/callbacks/stream_writer.hpp>
@@ -10,7 +14,6 @@
 #include <stan/variational/print_progress.hpp>
 #include <stan/variational/families/normal_fullrank.hpp>
 #include <stan/variational/families/normal_meanfield.hpp>
-#include <boost/circular_buffer.hpp>
 #include <boost/lexical_cast.hpp>
 #include <algorithm>
 #include <chrono>
@@ -20,6 +23,7 @@
 #include <queue>
 #include <string>
 #include <vector>
+#include <cmath>
 
 namespace stan {
 
@@ -47,22 +51,19 @@ class advi {
    * @param[in,out] rng random number generator
    * @param[in] n_monte_carlo_grad number of samples for gradient computation
    * @param[in] n_monte_carlo_elbo number of samples for ELBO computation
-   * @param[in] eval_elbo evaluate ELBO at every "eval_elbo" iters
    * @param[in] n_posterior_samples number of samples to draw from posterior
    * @throw std::runtime_error if n_monte_carlo_grad is not positive
    * @throw std::runtime_error if n_monte_carlo_elbo is not positive
-   * @throw std::runtime_error if eval_elbo is not positive
    * @throw std::runtime_error if n_posterior_samples is not positive
    */
   advi(Model& m, Eigen::VectorXd& cont_params, BaseRNG& rng,
-       int n_monte_carlo_grad, int n_monte_carlo_elbo, int eval_elbo,
+       int n_monte_carlo_grad, int n_monte_carlo_elbo,
        int n_posterior_samples)
       : model_(m),
         cont_params_(cont_params),
         rng_(rng),
         n_monte_carlo_grad_(n_monte_carlo_grad),
         n_monte_carlo_elbo_(n_monte_carlo_elbo),
-        eval_elbo_(eval_elbo),
         n_posterior_samples_(n_posterior_samples) {
     static const char* function = "stan::variational::advi";
     math::check_positive(function,
@@ -70,8 +71,6 @@ class advi {
                          n_monte_carlo_grad_);
     math::check_positive(function, "Number of Monte Carlo samples for ELBO",
                          n_monte_carlo_elbo_);
-    math::check_positive(function, "Evaluate ELBO at every eval_elbo iteration",
-                         eval_elbo_);
     math::check_positive(function, "Number of posterior samples for output",
                          n_posterior_samples_);
   }
@@ -151,312 +150,26 @@ class advi {
   }
 
   /**
-   * Heuristic grid search to adapt eta to the scale of the problem.
-   *
-   * @param[in] variational initial variational distribution.
-   * @param[in] adapt_iterations number of iterations to spend doing stochastic
-   * gradient ascent at each proposed eta value.
-   * @param[in,out] logger logger for messages
-   * @return adapted (tuned) value of eta via heuristic grid search
-   * @throw std::domain_error If either (a) the initial ELBO cannot be
-   * computed at the initial variational distribution, (b) all step-size
-   * proposals in eta_sequence fail.
-   */
-  double adapt_eta(Q& variational, int adapt_iterations,
-                   callbacks::logger& logger) const {
-    static const char* function = "stan::variational::advi::adapt_eta";
-
-    stan::math::check_positive(function, "Number of adaptation iterations",
-                               adapt_iterations);
-
-    logger.info("Begin eta adaptation.");
-
-    // Sequence of eta values to try during adaptation
-    const int eta_sequence_size = 5;
-    double eta_sequence[eta_sequence_size] = {100, 10, 1, 0.1, 0.01};
-
-    // Initialize ELBO tracking variables
-    double elbo = -std::numeric_limits<double>::max();
-    double elbo_best = -std::numeric_limits<double>::max();
-    double elbo_init;
-    try {
-      elbo_init = calc_ELBO(variational, logger);
-    } catch (const std::domain_error& e) {
-      const char* name
-          = "Cannot compute ELBO using the initial "
-            "variational distribution.";
-      const char* msg1
-          = "Your model may be either "
-            "severely ill-conditioned or misspecified.";
-      stan::math::throw_domain_error(function, name, "", msg1);
-    }
-
-    // Variational family to store gradients
-    Q elbo_grad = Q(model_.num_params_r());
-
-    // Adaptive step-size sequence
-    Q history_grad_squared = Q(model_.num_params_r());
-    double tau = 1.0;
-    double pre_factor = 0.9;
-    double post_factor = 0.1;
-
-    double eta_best = 0.0;
-    double eta;
-    double eta_scaled;
-
-    bool do_more_tuning = true;
-    int eta_sequence_index = 0;
-    while (do_more_tuning) {
-      // Try next eta
-      eta = eta_sequence[eta_sequence_index];
-
-      int print_progress_m;
-      for (int iter_tune = 1; iter_tune <= adapt_iterations; ++iter_tune) {
-        print_progress_m = eta_sequence_index * adapt_iterations + iter_tune;
-        variational ::print_progress(print_progress_m, 0,
-                                     adapt_iterations * eta_sequence_size,
-                                     adapt_iterations, true, "", "", logger);
-
-        // (ROBUST) Compute gradient of ELBO. It's OK if it diverges.
-        // We'll try a smaller eta.
-        try {
-          calc_ELBO_grad(variational, elbo_grad, logger);
-        } catch (const std::domain_error& e) {
-          elbo_grad.set_to_zero();
-        }
-
-        // Update step-size
-        if (iter_tune == 1) {
-          history_grad_squared += elbo_grad.square();
-        } else {
-          history_grad_squared = pre_factor * history_grad_squared
-                                 + post_factor * elbo_grad.square();
-        }
-        eta_scaled = eta / sqrt(static_cast<double>(iter_tune));
-        // Stochastic gradient update
-        variational
-            += eta_scaled * elbo_grad / (tau + history_grad_squared.sqrt());
-      }
-
-      // (ROBUST) Compute ELBO. It's OK if it has diverged.
-      try {
-        elbo = calc_ELBO(variational, logger);
-      } catch (const std::domain_error& e) {
-        elbo = -std::numeric_limits<double>::max();
-      }
-
-      // Check if:
-      // (1) ELBO at current eta is worse than the best ELBO
-      // (2) the best ELBO hasn't gotten worse than the initial ELBO
-      if (elbo < elbo_best && elbo_best > elbo_init) {
-        std::stringstream ss;
-        ss << "Success!"
-           << " Found best value [eta = " << eta_best << "]";
-        if (eta_sequence_index < eta_sequence_size - 1)
-          ss << (" earlier than expected.");
-        else
-          ss << ".";
-        logger.info(ss);
-        logger.info("");
-        do_more_tuning = false;
-      } else {
-        if (eta_sequence_index < eta_sequence_size - 1) {
-          // Reset
-          elbo_best = elbo;
-          eta_best = eta;
-        } else {
-          // No more eta values to try, so use current eta if it
-          // didn't diverge or fail if it did diverge
-          if (elbo > elbo_init) {
-            std::stringstream ss;
-            ss << "Success!"
-               << " Found best value [eta = " << eta_best << "].";
-            logger.info(ss);
-            logger.info("");
-            eta_best = eta;
-            do_more_tuning = false;
-          } else {
-            const char* name = "All proposed step-sizes";
-            const char* msg1
-                = "failed. Your model may be either "
-                  "severely ill-conditioned or misspecified.";
-            stan::math::throw_domain_error(function, name, "", msg1);
-          }
-        }
-        // Reset
-        history_grad_squared.set_to_zero();
-      }
-      ++eta_sequence_index;
-      variational = Q(cont_params_);
-    }
-    return eta_best;
-  }
-
-  /**
-   * Runs stochastic gradient ascent with an adaptive stepsize sequence.
-   *
-   * @param[in,out] variational initial variational distribution
-   * @param[in] eta stepsize scaling parameter
-   * @param[in] tol_rel_obj relative tolerance parameter for convergence
-   * @param[in] max_iterations max number of iterations to run algorithm
-   * @param[in,out] logger logger for messages
-   * @param[in,out] diagnostic_writer writer for diagnostic information
-   * @throw std::domain_error If the ELBO or its gradient is ever
-   * non-finite, at any iteration
-   */
-  void stochastic_gradient_ascent(Q& variational, double eta,
-                                  double tol_rel_obj, int max_iterations,
-                                  callbacks::logger& logger,
-                                  callbacks::writer& diagnostic_writer) const {
-    static const char* function
-        = "stan::variational::advi::stochastic_gradient_ascent";
-
-    stan::math::check_positive(function, "Eta stepsize", eta);
-    stan::math::check_positive(
-        function, "Relative objective function tolerance", tol_rel_obj);
-    stan::math::check_positive(function, "Maximum iterations", max_iterations);
-
-    // Gradient parameters
-    Q elbo_grad = Q(model_.num_params_r());
-
-    // Stepsize sequence parameters
-    Q history_grad_squared = Q(model_.num_params_r());
-    double tau = 1.0;
-    double pre_factor = 0.9;
-    double post_factor = 0.1;
-    double eta_scaled;
-
-    // Initialize ELBO and convergence tracking variables
-    double elbo(0.0);
-    double elbo_best = -std::numeric_limits<double>::max();
-    double elbo_prev = -std::numeric_limits<double>::max();
-    double delta_elbo = std::numeric_limits<double>::max();
-    double delta_elbo_ave = std::numeric_limits<double>::max();
-    double delta_elbo_med = std::numeric_limits<double>::max();
-
-    // Heuristic to estimate how far to look back in rolling window
-    int cb_size
-        = static_cast<int>(std::max(0.1 * max_iterations / eval_elbo_, 2.0));
-    boost::circular_buffer<double> elbo_diff(cb_size);
-
-    logger.info("Begin stochastic gradient ascent.");
-    logger.info(
-        "  iter"
-        "             ELBO"
-        "   delta_ELBO_mean"
-        "   delta_ELBO_med"
-        "   notes ");
-
-    // Timing variables
-    auto start = std::chrono::steady_clock::now();
-
-    // Main loop
-    bool do_more_iterations = true;
-    for (int iter_counter = 1; do_more_iterations; ++iter_counter) {
-      // Compute gradient using Monte Carlo integration
-      calc_ELBO_grad(variational, elbo_grad, logger);
-
-      // Update step-size
-      if (iter_counter == 1) {
-        history_grad_squared += elbo_grad.square();
-      } else {
-        history_grad_squared = pre_factor * history_grad_squared
-                               + post_factor * elbo_grad.square();
-      }
-      eta_scaled = eta / sqrt(static_cast<double>(iter_counter));
-
-      // Stochastic gradient update
-      variational
-          += eta_scaled * elbo_grad / (tau + history_grad_squared.sqrt());
-
-      // Check for convergence every "eval_elbo_"th iteration
-      if (iter_counter % eval_elbo_ == 0) {
-        elbo_prev = elbo;
-        elbo = calc_ELBO(variational, logger);
-        if (elbo > elbo_best)
-          elbo_best = elbo;
-        delta_elbo = rel_difference(elbo, elbo_prev);
-        elbo_diff.push_back(delta_elbo);
-        delta_elbo_ave
-            = std::accumulate(elbo_diff.begin(), elbo_diff.end(), 0.0)
-              / static_cast<double>(elbo_diff.size());
-        delta_elbo_med = circ_buff_median(elbo_diff);
-        std::stringstream ss;
-        ss << "  " << std::setw(4) << iter_counter << "  " << std::setw(15)
-           << std::fixed << std::setprecision(3) << elbo << "  "
-           << std::setw(16) << std::fixed << std::setprecision(3)
-           << delta_elbo_ave << "  " << std::setw(15) << std::fixed
-           << std::setprecision(3) << delta_elbo_med;
-        auto end = std::chrono::steady_clock::now();
-        double delta_t
-            = std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
-                  .count()
-              / 1000.0;
-        std::vector<double> print_vector;
-        print_vector.clear();
-        print_vector.push_back(iter_counter);
-        print_vector.push_back(delta_t);
-        print_vector.push_back(elbo);
-        diagnostic_writer(print_vector);
-
-        if (delta_elbo_ave < tol_rel_obj) {
-          ss << "   MEAN ELBO CONVERGED";
-          do_more_iterations = false;
-        }
-
-        if (delta_elbo_med < tol_rel_obj) {
-          ss << "   MEDIAN ELBO CONVERGED";
-          do_more_iterations = false;
-        }
-
-        if (iter_counter > 10 * eval_elbo_) {
-          if (delta_elbo_med > 0.5 || delta_elbo_ave > 0.5) {
-            ss << "   MAY BE DIVERGING... INSPECT ELBO";
-          }
-        }
-
-        logger.info(ss);
-
-        if (do_more_iterations == false
-            && rel_difference(elbo, elbo_best) > 0.05) {
-          logger.info(
-              "Informational Message: The ELBO at a previous "
-              "iteration is larger than the ELBO upon "
-              "convergence!");
-          logger.info(
-              "This variational approximation may not "
-              "have converged to a good optimum.");
-        }
-      }
-
-      if (iter_counter == max_iterations) {
-        logger.info(
-            "Informational Message: The maximum number of "
-            "iterations is reached! The algorithm may not have "
-            "converged.");
-        logger.info(
-            "This variational approximation is not "
-            "guaranteed to be meaningful.");
-        do_more_iterations = false;
-      }
-    }
-  }
-
-  /**
    * Runs ADVI and writes to output.
    *
    * @param[in] eta eta parameter of stepsize sequence
-   * @param[in] adapt_engaged boolean flag for eta adaptation
-   * @param[in] adapt_iterations number of iterations for eta adaptation
-   * @param[in] tol_rel_obj relative tolerance parameter for convergence
    * @param[in] max_iterations max number of iterations to run algorithm
+   * @param[in] min_window_size Minimum window  size to calculate optimal Rhat
+   * @param[in] num_chains Number of VI chains to run
+   * @param[in] ess_cut Minimum effective sample size threshold
+   * @param[in] mcse_cut MCSE error threshold
+   * @param[in] check_frequency Frequency to check for convergence 
+   * @param[in] num_grid_points Number of iterate values to calculate min(Rhat)
+   * in grid search 
+   * @param[in] num_chains Number of VI chains to run
    * @param[in,out] logger logger for messages
-   * @param[in,out] parameter_writer writer for parameters
-   *   (typically to file)
+   * @param[in,out] parameter_writer writer for parameters (typically to file)
    * @param[in,out] diagnostic_writer writer for diagnostic information
    */
-  int run(double eta, bool adapt_engaged, int adapt_iterations,
-          double tol_rel_obj, int max_iterations, callbacks::logger& logger,
+  int run(double eta,
+          int max_iterations, int min_window_size, double ess_cut, double mcse_cut, 
+          int check_frequency, int num_grid_points, int num_chains, 
+          callbacks::logger& logger,
           callbacks::writer& parameter_writer,
           callbacks::writer& diagnostic_writer) const {
     diagnostic_writer("iter,time_in_seconds,ELBO");
@@ -464,16 +177,8 @@ class advi {
     // Initialize variational approximation
     Q variational = Q(cont_params_);
 
-    if (adapt_engaged) {
-      eta = adapt_eta(variational, adapt_iterations, logger);
-      parameter_writer("Stepsize adaptation complete.");
-      std::stringstream ss;
-      ss << "eta = " << eta;
-      parameter_writer(ss.str());
-    }
-
-    stochastic_gradient_ascent(variational, eta, tol_rel_obj, max_iterations,
-                               logger, diagnostic_writer);
+    run_rvi(variational, eta, max_iterations, min_window_size, ess_cut, mcse_cut, 
+            check_frequency, num_grid_points, num_chains, logger);
 
     // Write posterior mean of variational approximations.
     cont_params_ = variational.mean();
@@ -522,36 +227,362 @@ class advi {
     return stan::services::error_codes::OK;
   }
 
-  // TODO(akucukelbir): move these things to stan math and test there
-
   /**
-   * Compute the median of a circular buffer.
-   *
-   * @param[in] cb circular buffer with some number of values in it.
-   * @return median of values in circular buffer.
+  * RVI Diagnostics: Calculates log importance weights
+  *
+  * @param[in] variational_obj variational family object
+  * @param[in, out] weight_vector An Eigen
+  * dynamic vector of weights, sorted in descending order
+  */
+  void lr(const Q& variational_obj, Eigen::VectorXd& weight_vector) 
+          const {
+    // Need to check the vector is empty
+    weight_vector.resize(n_posterior_samples_);
+    double log_p, log_g;
+    std::stringstream msg2;
+    Eigen::VectorXd draws(variational_obj.dimension());
+    // Draw posterior sample. log_g is the log normal densities.
+    for (int n = 0; n < n_posterior_samples_; ++n) {
+      variational_obj.sample_log_g(rng_, draws, log_g);
+      //  log_p: Log probability in the unconstrained space
+      log_p = model_.template log_prob<false, true>(draws, &msg2);
+      weight_vector(n) = log_p - log_g;
+    }
+    // sort descending order
+    std::sort(weight_vector.data(), weight_vector.data() + weight_vector.size(),
+              std::greater<double>());
+  }
+ 
+  /**
+   * RVI Diagnostics
+   * Estimate the Effective Sample Size and Monte Carlo Standard Error of posterior samples where
+   * MCSE = sqrt( var(parmas) / ess)
+   * @param[in] samples An Eigen::VectorXd containing posterior samples @TODO rewrite from here
+   * @param[in] ess If specified, will be used as effective sample size instead
+   * of calling compute_effective_sample_size()
+   * 
+   * @return Calculated MCSE
    */
-  double circ_buff_median(const boost::circular_buffer<double>& cb) const {
-    // FIXME: naive implementation; creates a copy as a vector
-    std::vector<double> v;
-    for (boost::circular_buffer<double>::const_iterator i = cb.begin();
-         i != cb.end(); ++i) {
-      v.push_back(*i);
+  static double ESS_MCSE(double &ess, double &mcse,
+                        const std::vector<const double*> draws,
+                        const std::vector<size_t> sizes) {
+    int num_chains = sizes.size();
+    size_t num_draws = sizes[0];
+    for (int chain = 1; chain < num_chains; ++chain) {
+      num_draws = std::min(num_draws, sizes[chain]);
     }
 
-    size_t n = v.size() / 2;
-    std::nth_element(v.begin(), v.begin() + n, v.end());
-    return v[n];
+    if (num_draws < 4) {
+      ess = std::numeric_limits<double>::quiet_NaN();
+      mcse = std::numeric_limits<double>::quiet_NaN();
+      return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    // check if chains are constant; all equal to first draw's value
+    bool are_all_const = false;
+    Eigen::VectorXd init_draw = Eigen::VectorXd::Zero(num_chains);
+
+    for (int chain_idx = 0; chain_idx < num_chains; chain_idx++) {
+      Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, 1>> draw(
+              draws[chain_idx], sizes[chain_idx]);
+
+      for (int n = 0; n < num_draws; n++) {
+        if (!std::isfinite(draw(n))) {
+          ess = std::numeric_limits<double>::quiet_NaN();
+          mcse = std::numeric_limits<double>::quiet_NaN();
+          return std::numeric_limits<double>::quiet_NaN();
+        }
+      }
+
+      init_draw(chain_idx) = draw(0);
+
+      if (draw.isApproxToConstant(draw(0))) {
+        are_all_const |= true;
+      }
+    }
+
+    if (are_all_const) {
+      // If all chains are constant then return NaN
+      // if they all equal the same constant value
+      if (init_draw.isApproxToConstant(init_draw(0))) {
+        ess = std::numeric_limits<double>::quiet_NaN();;
+        mcse = std::numeric_limits<double>::quiet_NaN();
+        return std::numeric_limits<double>::quiet_NaN();
+      }
+    }
+
+    Eigen::Matrix<Eigen::VectorXd, Eigen::Dynamic, 1> acov(num_chains);
+    Eigen::VectorXd chain_mean(num_chains);
+    Eigen::VectorXd chain_sq_mean(num_chains);
+    Eigen::VectorXd chain_var(num_chains);
+    for (int chain = 0; chain < num_chains; ++chain) {
+      Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, 1>> draw(
+              draws[chain], sizes[chain]);
+      stan::analyze::autocovariance<double>(draw, acov(chain));
+      chain_mean(chain) = draw.mean();
+      chain_sq_mean(chain) = draw.array().square().mean();
+      chain_var(chain) = acov(chain)(0) * num_draws / (num_draws - 1);
+    }
+
+    double mean_var = chain_var.mean();
+    double var_plus = mean_var * (num_draws - 1) / num_draws;
+    if (num_chains > 1)
+      var_plus += math::variance(chain_mean);
+    Eigen::VectorXd rho_hat_s(num_draws);
+    rho_hat_s.setZero();
+    Eigen::VectorXd acov_s(num_chains);
+    for (int chain = 0; chain < num_chains; ++chain)
+      acov_s(chain) = acov(chain)(1);
+    double rho_hat_even = 1.0;
+    rho_hat_s(0) = rho_hat_even;
+    double rho_hat_odd = 1 - (mean_var - acov_s.mean()) / var_plus;
+    rho_hat_s(1) = rho_hat_odd;
+
+    // Convert raw autocovariance estimators into Geyer's initial
+    // positive sequence. Loop only until num_draws - 4 to
+    // leave the last pair of autocorrelations as a bias term that
+    // reduces variance in the case of antithetical chains.
+    size_t s = 1;
+    while (s < (num_draws - 4) && (rho_hat_even + rho_hat_odd) > 0) {
+      for (int chain = 0; chain < num_chains; ++chain)
+        acov_s(chain) = acov(chain)(s + 1);
+      rho_hat_even = 1 - (mean_var - acov_s.mean()) / var_plus;
+      for (int chain = 0; chain < num_chains; ++chain)
+        acov_s(chain) = acov(chain)(s + 2);
+      rho_hat_odd = 1 - (mean_var - acov_s.mean()) / var_plus;
+      if ((rho_hat_even + rho_hat_odd) >= 0) {
+        rho_hat_s(s + 1) = rho_hat_even;
+        rho_hat_s(s + 2) = rho_hat_odd;
+      }
+      s += 2;
+    }
+
+    int max_s = s;
+    // this is used in the improved estimate, which reduces variance
+    // in antithetic case -- see tau_hat below
+    if (rho_hat_even > 0)
+      rho_hat_s(max_s + 1) = rho_hat_even;
+
+    // Convert Geyer's initial positive sequence into an initial
+    // monotone sequence
+    for (int s = 1; s <= max_s - 3; s += 2) {
+      if (rho_hat_s(s + 1) + rho_hat_s(s + 2) > rho_hat_s(s - 1) + rho_hat_s(s)) {
+        rho_hat_s(s + 1) = (rho_hat_s(s - 1) + rho_hat_s(s)) / 2;
+        rho_hat_s(s + 2) = rho_hat_s(s + 1);
+      }
+    }
+
+    double num_total_draws = num_chains * num_draws;
+    // Geyer's truncated estimator for the asymptotic variance
+    // Improved estimate reduces variance in antithetic case
+    double tau_hat = -1 + 2 * rho_hat_s.head(max_s).sum() + rho_hat_s(max_s + 1);
+    double ess_val = num_total_draws / tau_hat;
+    ess = ess_val;
+    mcse = std::sqrt((chain_sq_mean.mean() - chain_mean.mean() * chain_mean.mean())/ess_val);
+    return 0;
   }
 
   /**
-   * Compute the relative difference between two double values.
-   *
-   * @param[in] prev previous value
-   * @param[in] curr current value
-   * @return  absolutely value of relative difference
+   * Run Fixed-learning-rate Robust Variational Inference.
+   * J. Huggins et al., 2021
+   * 
+   * @param[in] variational The variational class
+   * @param[in] eta Learning rate(stepsize, constant)
+   * @param[in] max_runs Max number of VI iterations
+   * @param[in] min_window_size Minimum window size to calculate optimal Rhat
+   * @param[in] ess_cut Minimum effective sample size threshold
+   * @param[in] mcse_cut MCSE error threshold
+   * @param[in] check_frequency Frequency to check for convergence 
+   * @param[in] num_grid_points Number of iterate values to calculate min(Rhat)
+   * in grid search
+   * @param[in] num_chains Number of VI chains to run
+   * @param[in] logger logger
    */
-  double rel_difference(double prev, double curr) const {
-    return std::fabs((curr - prev) / prev);
+  void run_rvi(Q& variational, const double eta,
+	        const int max_runs, const int min_window_size, int ess_cut,
+          const double mcse_cut, int check_frequency, const int num_grid_points,
+          const int num_chains, callbacks::logger& logger) const {
+
+    std::stringstream ss;
+
+    if (ess_cut <= 0){
+      ess_cut = min_window_size / 8;
+    }
+    if (check_frequency <= 0){
+      check_frequency = min_window_size;
+    }
+
+    const int model_dim = variational.dimension();
+    const int num_approx_params = variational.num_approx_params();
+
+    std::vector<Q> variational_obj_vec; // vector of variational objs per chain
+    std::vector<Q> elbo_grad_vec; // variational to store elbo grads per chain
+
+    // For each chain, save variational parameter values on matrix
+    // of dim (n_params, n_iters).
+    // tbh, RowMajor isn't necessary, but it made me easier to keep track of
+    // indexes and not screw them up
+    typedef Eigen::Matrix<double, Eigen::Dynamic, 
+                          Eigen::Dynamic, Eigen::RowMajor> histMat;
+
+    std::vector<histMat> hist_vector; // save values per iter per chain
+
+    hist_vector.reserve(num_chains);
+    variational_obj_vec.reserve(num_chains);
+    elbo_grad_vec.reserve(num_chains);
+
+    for(int i = 0; i < num_chains; i++){
+      hist_vector.push_back(histMat(num_approx_params, max_runs));
+      variational_obj_vec.push_back(Q(cont_params_));
+      elbo_grad_vec.push_back(Q(model_dim));
+    }
+
+    // FASO specific variables
+    int k_conv = -1; // here -1 is just set to represent 'null' or 'nan'
+    int w_check = -1;
+    bool success = false;
+    int iterations_ran = 0;
+    //
+
+    std::chrono::duration<double> optimize_duration(0);
+    std::chrono::duration<double> mcse_duration(0);
+    logger.info("Start FASO loop\n");
+    for (int n_iter = 0; n_iter < max_runs; n_iter++){
+      iterations_ran = n_iter;
+      auto start_time = std::chrono::steady_clock::now();
+      for (int n_chain = 0; n_chain < num_chains; n_chain++){
+        calc_ELBO_grad(variational_obj_vec[n_chain], elbo_grad_vec[n_chain], logger);
+        variational_obj_vec[n_chain] += eta * elbo_grad_vec[n_chain];
+        // stochastic update
+
+        hist_vector[n_chain].col(n_iter) = variational_obj_vec[n_chain].return_approx_params();
+      }
+      optimize_duration += (std::chrono::steady_clock::now() - start_time) / num_chains;
+
+      if (k_conv < 0 && n_iter % check_frequency == 0 && n_iter > 0){
+        ss << "C1:Current iteration: " << n_iter <<"\n";
+        double min_chain_rhat = std::numeric_limits<double>::infinity(); // lowest reported rhat value across windows
+        for(int grid_i = 0; grid_i < num_grid_points; grid_i++){
+          // create equally spaced grid points from min_window_size to 0.95k
+          int rhat_lookback_iters = min_window_size + grid_i * 
+                                static_cast<int>(0.95 * n_iter - min_window_size) / (num_grid_points - 1);
+          double rhat, max_rhat = std::numeric_limits<double>::lowest(); // highest rhat across parameters
+          for(int k = 0; k < num_approx_params; k++) {
+            std::vector<const double*> hist_ptrs;
+            std::vector<size_t> chain_length;
+            const int split_point = n_iter/2;
+            if(num_chains == 1){
+              // use split rhat
+              chain_length.assign(2, static_cast<size_t>(rhat_lookback_iters / 2));
+              hist_ptrs.push_back(hist_vector[0].row(k).data() + n_iter - rhat_lookback_iters + 1);
+              hist_ptrs.push_back(hist_vector[0].row(k).data() + n_iter - rhat_lookback_iters / 2 + 1);
+            }
+            else{
+              for(int i = 0; i < num_chains; i++){
+                //chain_length.push_back(static_cast<size_t>(n_iter * window_size));
+                //hist_ptrs.push_back(hist_vector[i].row(k).data());
+
+                // multi-chain split rhat (split each chain into 2)
+                chain_length.insert(chain_length.end(), 2, static_cast<size_t>(rhat_lookback_iters / 2));
+                hist_ptrs.push_back(hist_vector[i].row(k).data() + n_iter - rhat_lookback_iters + 1);
+                hist_ptrs.push_back(hist_vector[i].row(k).data() + n_iter - rhat_lookback_iters / 2 + 1);
+              }
+            }
+            rhat = stan::analyze::compute_potential_scale_reduction(hist_ptrs, chain_length);
+            max_rhat = std::max<double>(max_rhat, rhat);
+          }
+          if (max_rhat <= min_chain_rhat){
+            k_conv = n_iter - rhat_lookback_iters + 1;
+            w_check = rhat_lookback_iters;
+            min_chain_rhat = max_rhat;
+          }
+        }
+        if (min_chain_rhat > 1.1){
+          // if we can't meet the convergence criteria, reset condition variables
+          k_conv = -1;
+          w_check = -1;
+        }
+        else{
+          ss << "k_conv set to:" << k_conv << ", min_rhat: " << min_chain_rhat << "\n";
+        }
+      }
+
+      if (k_conv > 0 && (n_iter - k_conv + 1 == w_check)){
+        ss << "\nC2:Current iteration: " << n_iter << "\n";
+        for(int i = 0; i < num_chains; i++){
+          variational_obj_vec[i].set_approx_params(hist_vector[i].block(0, n_iter - w_check, num_approx_params, w_check).rowwise().mean());
+          // set parameters per chain to iterate average values
+        }
+
+        // pool and average all chain results into single return value
+        variational.set_to_zero();
+        for(int i = 0; i < num_chains; i++){
+          variational += 1.0 / num_chains * variational_obj_vec[i];
+        }
+        double ess, mcse, min_ess, max_mcse;
+        min_ess = std::numeric_limits<double>::infinity(); // min ess across all chains
+        max_mcse = std::numeric_limits<double>::lowest(); // max mcse across all chains
+
+        start_time = std::chrono::steady_clock::now();
+        for(int k = 0; k < num_approx_params; k++){
+          std::vector<const double*> hist_ptrs;
+          std::vector<size_t> chain_length;
+          for(int i = 0; i < num_chains; i++){
+            chain_length.push_back(static_cast<size_t>(w_check));
+            hist_ptrs.push_back(hist_vector[i].row(k).data() + n_iter - w_check);
+          }
+          ESS_MCSE(ess, mcse, hist_ptrs, chain_length);
+          if (std::is_same<Q, normal_meanfield>::value && k < model_dim){ // I know, it probably won't work
+            // divide MCSE of mu by exp(sigma);
+            mcse /= std::exp(hist_vector[0].row(k + model_dim).tail(w_check).mean());
+            //sigma corresponding to mu is k + model_dim
+
+            //mcse /= std::exp(hist_vector[0].block(model_dim + k, n_iter - w_check + 1, model_dim + k, w_check).rowwise().mean());
+            // TODO: handle multiple chains
+            // Currently just uses mean of the first chain
+          }
+          min_ess = std::min<double>(min_ess, ess);
+          max_mcse = std::max<double>(max_mcse, mcse);
+        }
+        mcse_duration = std::chrono::steady_clock::now() - start_time;
+        mcse_duration /= w_check;
+        ss << "min_ess: " << min_ess << " max_mcse: " << max_mcse << "\n"; 
+        if (max_mcse < mcse_cut && min_ess >= ess_cut){
+          success = true;
+          break;
+        }
+        else{
+          w_check *= std::max<double>(1 + 1 / std::sqrt(optimize_duration.count() / mcse_duration.count()), 1.05);
+          ss << "w_check set to: " << w_check << "\n";
+
+        }
+      }
+    }
+    for(int i = 0; i < num_chains; i++){
+      variational_obj_vec[i].set_approx_params(hist_vector[i].block(0, iterations_ran - w_check, num_approx_params, w_check).rowwise().mean());
+      // set parameters per chain to iterate average values
+    }
+
+    // pool and average all chain results into single return value
+    variational.set_to_zero();
+    for(int i = 0; i < num_chains; i++){
+      variational += 1.0 / num_chains * variational_obj_vec[i];
+    }
+
+    ss << "k_conv: " << k_conv << " total iterations ran: " << iterations_ran << "\n";
+    if (success){
+      ss << "Optimization finished succesfully\n";
+    }
+    else{
+      ss << "Optimization failed. Results are probably unreliable.\n";
+    }
+    for(int i = 0; i < num_chains; i++){
+      ss << "Chain " << i << " mean:\n" << variational_obj_vec[i].mean() << "\n";
+    }
+    ss << "----\nQ variational:\n" << variational.mean() << "\n----\n";
+    ss << "Num of Model params: " << model_dim << "\n";
+    ss << "Num of Approx params: " << num_approx_params << "\n";
+    logger.info(ss);
   }
 
  protected:
@@ -560,7 +591,6 @@ class advi {
   BaseRNG& rng_;
   int n_monte_carlo_grad_;
   int n_monte_carlo_elbo_;
-  int eval_elbo_;
   int n_posterior_samples_;
 };
 }  // namespace variational

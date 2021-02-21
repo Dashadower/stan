@@ -176,70 +176,7 @@ struct eta {
    *
    * @return 1.0
    */
-  static double default_value() { return 1.0; }
-};
-
-/**
- * Flag for eta adaptation.
- */
-struct adapt_engaged {
-  /**
-   * Return the string description of adapt_engaged.
-   *
-   * @return description
-   */
-  static std::string description() {
-    return "Boolean flag for eta adaptation.";
-  }
-
-  /**
-   * Validates adapt_engaged. This is a no-op.
-   *
-   * @param[in] adapt_engaged argument to validate
-   */
-  static void validate(bool adapt_engaged) {}
-
-  /**
-   * Return the default adapt_engaged value.
-   *
-   * @return true
-   */
-  static bool default_value() { return true; }
-};
-
-/**
- * Number of iterations for eta adaptation.
- */
-struct adapt_iterations {
-  /**
-   * Return the string description of adapt_iterations.
-   *
-   * @return description
-   */
-  static std::string description() {
-    return "Number of iterations for eta adaptation.";
-  }
-
-  /**
-   * Validates adapt_iterations; must be greater than 0.
-   *
-   * @param[in] adapt_iterations argument to validate
-   * @throw std::invalid_argument unless adapt_iterations is
-   *   greater than zero
-   */
-  static void validate(int adapt_iterations) {
-    if (!(adapt_iterations > 0))
-      throw std::invalid_argument(
-          "adapt_iterations must be greater"
-          " than 0.");
-  }
-
-  /**
-   * Return the default adapt_iterations value.
-   *
-   * @return 50
-   */
-  static int default_value() { return 50; }
+  static double default_value() { return 0.01; }
 };
 
 /**

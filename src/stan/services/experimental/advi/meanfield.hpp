@@ -32,12 +32,13 @@ namespace advi {
  * @param[in] elbo_samples number of samples for Monte Carlo estimate
  *   of ELBO
  * @param[in] max_iterations maximum number of iterations
- * @param[in] tol_rel_obj convergence tolerance on the relative norm
- *   of the objective
  * @param[in] eta stepsize scaling parameter for variational inference
- * @param[in] adapt_engaged adaptation engaged?
- * @param[in] adapt_iterations number of iterations for eta adaptation
- * @param[in] eval_elbo evaluate ELBO every Nth iteration
+ * @param[in] min_window_size Minimum size of window to produce optimal window size
+ * @param[in] check_frequency Frequency to check for convergence
+ * @param[in] num_grid_points Number of iterate values to calculate min(Rhat)
+ * @param[in] mcse_cut MCSE termination criteria
+ * @param[in] ess_cut effective sample size termination criteria, equals min_sample_size
+ * @param[in] num_chains Number of VI chains to run
  * @param[in] output_samples number of posterior samples to draw and
  *   save
  * @param[in,out] interrupt callback to be called every iteration
@@ -51,8 +52,9 @@ template <class Model>
 int meanfield(Model& model, const stan::io::var_context& init,
               unsigned int random_seed, unsigned int chain, double init_radius,
               int grad_samples, int elbo_samples, int max_iterations,
-              double tol_rel_obj, double eta, bool adapt_engaged,
-              int adapt_iterations, int eval_elbo, int output_samples,
+              double eta, int min_window_size, int check_frequency, 
+              int num_grid_points, double mcse_cut, double ess_cut,
+              int num_chains, int output_samples,
               callbacks::interrupt& interrupt, callbacks::logger& logger,
               callbacks::writer& init_writer,
               callbacks::writer& parameter_writer,
@@ -77,10 +79,11 @@ int meanfield(Model& model, const stan::io::var_context& init,
 
   stan::variational::advi<Model, stan::variational::normal_meanfield,
                           boost::ecuyer1988>
-      cmd_advi(model, cont_params, rng, grad_samples, elbo_samples, eval_elbo,
-               output_samples);
-  cmd_advi.run(eta, adapt_engaged, adapt_iterations, tol_rel_obj,
-               max_iterations, logger, parameter_writer, diagnostic_writer);
+    cmd_advi(model, cont_params, rng, grad_samples, elbo_samples,
+	     output_samples);
+  cmd_advi.run(eta, max_iterations, min_window_size, ess_cut, mcse_cut,
+               check_frequency, num_grid_points,  num_chains, logger, 
+               parameter_writer, diagnostic_writer);
 
   return 0;
 }
