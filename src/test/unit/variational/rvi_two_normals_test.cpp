@@ -40,7 +40,7 @@ TEST(rvi_test, two_normals_meanfield) {
   double mcse_cut = 0.02;
   double ess_cut = 20;
   int check_frequency = 200;
-  int min_window_size = 200;
+  int min_window_size = check_frequency;
   int num_grid_points = 5;
   int num_chains = 1;
   int n_posterior_samples = 1000;

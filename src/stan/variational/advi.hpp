@@ -457,19 +457,15 @@ class advi {
 
         hist_vector[n_chain].col(n_iter) = variational_obj_vec[n_chain].return_approx_params();
       }
-      optimize_duration += std::chrono::steady_clock::now() - start_time;
-      optimize_duration /= num_chains * n_iter;
+      optimize_duration += (std::chrono::steady_clock::now() - start_time) / num_chains;
 
       if (k_conv < 0 && n_iter % check_frequency == 0 && n_iter > 0){
-        std::stringstream dbg;
-        dbg << "Current iteration: " << n_iter << "\n";
-        logger.info(dbg);
+        ss << "C1:Current iteration: " << n_iter <<"\n";
         double min_chain_rhat = std::numeric_limits<double>::infinity(); // lowest reported rhat value across windows
         for(int grid_i = 0; grid_i < num_grid_points; grid_i++){
           // create equally spaced grid points from min_window_size to 0.95k
           int rhat_lookback_iters = min_window_size + grid_i * 
                                 static_cast<int>(0.95 * n_iter - min_window_size) / (num_grid_points - 1);
-          
           double rhat, max_rhat = std::numeric_limits<double>::lowest(); // highest rhat across parameters
           for(int k = 0; k < num_approx_params; k++) {
             std::vector<const double*> hist_ptrs;
@@ -479,7 +475,7 @@ class advi {
               // use split rhat
               chain_length.assign(2, static_cast<size_t>(rhat_lookback_iters / 2));
               hist_ptrs.push_back(hist_vector[0].row(k).data() + n_iter - rhat_lookback_iters + 1);
-              hist_ptrs.push_back(hist_ptrs[0] + n_iter - rhat_lookback_iters / 2 + 1);
+              hist_ptrs.push_back(hist_vector[0].row(k).data() + n_iter - rhat_lookback_iters / 2 + 1);
             }
             else{
               for(int i = 0; i < num_chains; i++){
@@ -489,7 +485,7 @@ class advi {
                 // multi-chain split rhat (split each chain into 2)
                 chain_length.insert(chain_length.end(), 2, static_cast<size_t>(rhat_lookback_iters / 2));
                 hist_ptrs.push_back(hist_vector[i].row(k).data() + n_iter - rhat_lookback_iters + 1);
-                hist_ptrs.push_back(hist_vector[i].row(k).data() +  n_iter - rhat_lookback_iters / 2 + 1);
+                hist_ptrs.push_back(hist_vector[i].row(k).data() + n_iter - rhat_lookback_iters / 2 + 1);
               }
             }
             rhat = stan::analyze::compute_potential_scale_reduction(hist_ptrs, chain_length);
@@ -506,12 +502,13 @@ class advi {
           k_conv = -1;
           w_check = -1;
         }
+        else{
+          ss << "k_conv set to:" << k_conv << ", min_rhat: " << min_chain_rhat << "\n";
+        }
       }
 
       if (k_conv > 0 && (n_iter - k_conv + 1 == w_check)){
-        std::stringstream dbg2;
-        dbg2 << "Current iteration: " << n_iter << "\n";
-        logger.info(dbg2);
+        ss << "\nC2:Current iteration: " << n_iter << "\n";
         for(int i = 0; i < num_chains; i++){
           variational_obj_vec[i].set_approx_params(hist_vector[i].block(0, n_iter - w_check, num_approx_params, w_check).rowwise().mean());
           // set parameters per chain to iterate average values
@@ -549,12 +546,15 @@ class advi {
         }
         mcse_duration = std::chrono::steady_clock::now() - start_time;
         mcse_duration /= w_check;
+        ss << "min_ess: " << min_ess << " max_mcse: " << max_mcse << "\n"; 
         if (max_mcse < mcse_cut && min_ess >= ess_cut){
           success = true;
           break;
         }
         else{
-          w_check *= 1 + 1 / std::sqrt(optimize_duration.count() / mcse_duration.count());
+          w_check *= std::max<double>(1 + 1 / std::sqrt(optimize_duration.count() / mcse_duration.count()), 1.05);
+          ss << "w_check set to: " << w_check << "\n";
+
         }
       }
     }
