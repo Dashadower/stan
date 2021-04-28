@@ -59,7 +59,7 @@ class advi_base {
    * @throw std::runtime_error if n_monte_carlo_elbo is not positive
    * @throw std::runtime_error if n_posterior_samples is not positive
    */
-  advi(Model& m, Eigen::VectorXd& cont_params, BaseRNG& rng,
+  advi_base(Model& m, Eigen::VectorXd& cont_params, BaseRNG& rng,
        int n_monte_carlo_grad, int n_monte_carlo_elbo,
        int n_posterior_samples)
       : model_(m),
@@ -743,10 +743,10 @@ template <class Model, class Q, class BaseRNG>
 class advi : public advi_base<Model, Q, BaseRNG> {
  public:
   advi(Model& m, Eigen::VectorXd& cont_params, BaseRNG& rng,
-       int n_monte_carlo_grad, int n_monte_carlo_elbo, int eval_elbo,
+       int n_monte_carlo_grad, int n_monte_carlo_elbo,
        int n_posterior_samples)
       : advi_base<Model, Q, BaseRNG>(m, cont_params, rng, n_monte_carlo_grad,
-                                     n_monte_carlo_elbo, eval_elbo,
+                                     n_monte_carlo_elbo,
                                      n_posterior_samples) {}
 
  private:
@@ -776,7 +776,6 @@ class advi_lowrank
    * @param[in] rank rank of approximation
    * @param[in] n_monte_carlo_grad number of samples for gradient computation
    * @param[in] n_monte_carlo_elbo number of samples for ELBO computation
-   * @param[in] eval_elbo evaluate ELBO at every "eval_elbo" iters
    * @param[in] n_posterior_samples number of samples to draw from posterior
    * @throw std::runtime_error if n_monte_carlo_grad is not positive
    * @throw std::runtime_error if n_monte_carlo_elbo is not positive
@@ -784,11 +783,9 @@ class advi_lowrank
    * @throw std::runtime_error if n_posterior_samples is not positive
    */
   advi_lowrank(Model& m, Eigen::VectorXd& cont_params, BaseRNG& rng,
-               size_t rank, int n_monte_carlo_grad, int n_monte_carlo_elbo,
-               int eval_elbo, int n_posterior_samples)
+               size_t rank, int n_monte_carlo_grad, int n_monte_carlo_elbo, int n_posterior_samples)
       : advi_base<Model, stan::variational::normal_lowrank, BaseRNG>(
-            m, cont_params, rng, n_monte_carlo_grad, n_monte_carlo_elbo,
-            eval_elbo, n_posterior_samples),
+            m, cont_params, rng, n_monte_carlo_grad, n_monte_carlo_elbo, n_posterior_samples),
         rank_(rank) {
     static const char* function = "stan::variational::advi_lowrank";
     math::check_positive(function, "Approximation rank", rank_);
