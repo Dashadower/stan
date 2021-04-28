@@ -14,6 +14,8 @@
 #include <stan/variational/print_progress.hpp>
 #include <stan/variational/families/normal_fullrank.hpp>
 #include <stan/variational/families/normal_meanfield.hpp>
+#include <stan/variational/families/normal_lowrank.hpp>
+#include <boost/circular_buffer.hpp>
 #include <boost/lexical_cast.hpp>
 #include <algorithm>
 #include <chrono>
@@ -34,14 +36,15 @@ namespace variational {
  *
  * Implements "black box" variational inference using stochastic gradient
  * ascent to maximize the Evidence Lower Bound for a given model
- * and variational family.
+ * and variational family. This base class encapsulates the mean-field,
+ * low-rank, and full-rank variational posterior classes.
  *
  * @tparam Model class of model
  * @tparam Q class of variational distribution
  * @tparam BaseRNG class of random number generator
  */
 template <class Model, class Q, class BaseRNG>
-class advi {
+class advi_base {
  public:
   /**
    * Constructor
@@ -191,10 +194,10 @@ class advi {
     }
 
     // Variational family to store gradients
-    Q elbo_grad = Q(model_.num_params_r());
+    Q elbo_grad = init_variational(model_.num_params_r());
 
     // Adaptive step-size sequence
-    Q history_grad_squared = Q(model_.num_params_r());
+    Q history_grad_squared = init_variational(model_.num_params_r());
     double tau = 1.0;
     double pre_factor = 0.9;
     double post_factor = 0.1;
@@ -286,12 +289,13 @@ class advi {
         history_grad_squared.set_to_zero();
       }
       ++eta_sequence_index;
-      variational = Q(cont_params_);
+      variational = init_variational(cont_params_);
     }
     return eta_best;
   }
 
   /**
+   * Runs ADVI and writes to output
    * Run Robust Variational Inference.
    * A. Dhaka et al., 2020
    *
@@ -722,6 +726,86 @@ class advi {
   int n_monte_carlo_grad_;
   int n_monte_carlo_elbo_;
   int n_posterior_samples_;
+
+ private:
+  virtual Q init_variational(Eigen::VectorXd& cont_params) const = 0;
+  virtual Q init_variational(size_t dimension) const = 0;
+};
+
+/**
+ * The ADVI implementation used for meanfield and full-rank approximations.
+ *
+ * @tparam Model Class of model
+ * @tparam Q Class of variational distribution, either mean-field or low-rank.
+ * @tparam BaseRNG Class of random number generator
+ */
+template <class Model, class Q, class BaseRNG>
+class advi : public advi_base<Model, Q, BaseRNG> {
+ public:
+  advi(Model& m, Eigen::VectorXd& cont_params, BaseRNG& rng,
+       int n_monte_carlo_grad, int n_monte_carlo_elbo, int eval_elbo,
+       int n_posterior_samples)
+      : advi_base<Model, Q, BaseRNG>(m, cont_params, rng, n_monte_carlo_grad,
+                                     n_monte_carlo_elbo, eval_elbo,
+                                     n_posterior_samples) {}
+
+ private:
+  Q init_variational(Eigen::VectorXd& cont_params) const {
+    return Q(cont_params);
+  }
+
+  Q init_variational(size_t dimension) const { return Q(dimension); }
+};
+
+/**
+ * The ADVI implementation used only for low-rank approximations.
+ *
+ * @tparam Model Class of model.
+ * @tparam BaseRNG Class of random number generator.
+ */
+template <class Model, class BaseRNG>
+class advi_lowrank
+    : public advi_base<Model, stan::variational::normal_lowrank, BaseRNG> {
+ public:
+  /**
+   * Constructor
+   *
+   * @param[in] m stan model
+   * @param[in] cont_params initialization of continuous parameters
+   * @param[in,out] rng random number generator
+   * @param[in] rank rank of approximation
+   * @param[in] n_monte_carlo_grad number of samples for gradient computation
+   * @param[in] n_monte_carlo_elbo number of samples for ELBO computation
+   * @param[in] eval_elbo evaluate ELBO at every "eval_elbo" iters
+   * @param[in] n_posterior_samples number of samples to draw from posterior
+   * @throw std::runtime_error if n_monte_carlo_grad is not positive
+   * @throw std::runtime_error if n_monte_carlo_elbo is not positive
+   * @throw std::runtime_error if eval_elbo is not positive
+   * @throw std::runtime_error if n_posterior_samples is not positive
+   */
+  advi_lowrank(Model& m, Eigen::VectorXd& cont_params, BaseRNG& rng,
+               size_t rank, int n_monte_carlo_grad, int n_monte_carlo_elbo,
+               int eval_elbo, int n_posterior_samples)
+      : advi_base<Model, stan::variational::normal_lowrank, BaseRNG>(
+            m, cont_params, rng, n_monte_carlo_grad, n_monte_carlo_elbo,
+            eval_elbo, n_posterior_samples),
+        rank_(rank) {
+    static const char* function = "stan::variational::advi_lowrank";
+    math::check_positive(function, "Approximation rank", rank_);
+  }
+
+ protected:
+  size_t rank_;
+
+ private:
+  stan::variational::normal_lowrank init_variational(
+      Eigen::VectorXd& cont_params) const {
+    return stan::variational::normal_lowrank(cont_params, rank_);
+  }
+
+  stan::variational::normal_lowrank init_variational(size_t dimension) const {
+    return stan::variational::normal_lowrank(dimension, rank_);
+  }
 };
 }  // namespace variational
 }  // namespace stan
